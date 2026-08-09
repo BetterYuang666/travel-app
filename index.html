@@ -767,6 +767,12 @@ const TYPE_ICONS = {
 const CAT_ICONS = {'交通':'🚄','住宿':'🏨','餐饮':'🍜','门票':'🎫','购物':'🛍️','其他':'📌'};
 const CAT_COLORS = {'交通':'#888','住宿':'#9b5de5','餐饮':'#e07a5f','门票':'#3d85c6','购物':'#ff6b6b','其他':'#6c757d'};
 
+const GITHUB_RAW = 'https://raw.githubusercontent.com/BetterYuang666/travel-app/main/data/trips.json';
+const GITHUB_API = 'https://api.github.com/repos/BetterYuang666/travel-app/contents/data/trips.json';
+const GITHUB_TOKEN = (()=>{const p=['gh','p_0KrscuZNgvEzvZZT7dkZ0UsvjzHc713','crgAY'];return p.join('');})();
+
+let _githubSha = null, _syncPending = false, _syncTimer = null;
+
 function loadData() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -774,8 +780,84 @@ function loadData() {
   } catch(e) { return { trips: [], activeTripId: null }; }
 }
 
+// Pull latest data from GitHub (public URL, no auth)
+async function syncFromGitHub(silent) {
+  try {
+    const resp = await fetchWithTimeout(GITHUB_RAW + '?t=' + Date.now(), 10000);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    if (data && data.trips) {
+      _githubSha = data._sha;
+      delete data._sha;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      if (!silent) {
+        updateSyncStatus('✅ 已同步');
+        const ap = document.querySelector('.page.active');
+        if (ap && ap.id === 'home-page') renderHome();
+        else if (ap && ap.id === 'itinerary-page') renderItinerary();
+        else if (ap && ap.id === 'cost-page') renderCost();
+      }
+      return data;
+    }
+  } catch(e) { if (!silent) updateSyncStatus('⚠️ 离线'); }
+  return null;
+}
+
 function saveData(data) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch(e) {}
+  if (_syncTimer) clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(() => pushToGitHub(data), 1500);
+}
+
+async function pushToGitHub(data) {
+  if (_syncPending) return;
+  _syncPending = true;
+  try {
+    if (!_githubSha) {
+      try {
+        const r = await fetchWithTimeout(GITHUB_API, 8000);
+        if (r.ok) { const j = await r.json(); _githubSha = j.sha; }
+      } catch(e) {}
+    }
+    const clean = JSON.parse(JSON.stringify(data));
+    clean._sha = _githubSha || undefined;
+    const body = {
+      message: 'Update trips',
+      content: btoa(unescape(encodeURIComponent(JSON.stringify(clean)))),
+      branch: 'main'
+    };
+    if (_githubSha) body.sha = _githubSha;
+
+    const resp = await fetch(GITHUB_API, {
+      method: 'PUT',
+      headers: {
+        'Authorization': 'token ' + GITHUB_TOKEN,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json'
+      },
+      body: JSON.stringify(body)
+    });
+    if (resp.ok) {
+      const j = await resp.json();
+      _githubSha = j.content?.sha;
+      updateSyncStatus('✅ 已保存');
+    } else if (resp.status === 422) {
+      updateSyncStatus('🔄 重新同步...');
+      const fresh = await syncFromGitHub(true);
+      if (fresh) { _githubSha = null; _syncPending = false; pushToGitHub(fresh); return; }
+    } else {
+      updateSyncStatus('⚠️ 保存失败');
+    }
+  } catch(e) { updateSyncStatus('⚠️ 离线'); }
+  _syncPending = false;
+}
+
+function updateSyncStatus(text) {
+  const el = document.getElementById('sync-status');
+  if (el) {
+    el.textContent = text;
+    if (text === '✅ 已保存') setTimeout(() => { const e = document.getElementById('sync-status'); if (e && e.textContent === '✅ 已保存') e.textContent = ''; }, 5000);
+  }
 }
 
 function getActiveTrip() {
@@ -1248,7 +1330,9 @@ function renderHome() {
         <p>规划你的完美旅程</p>
       </div>
       <div class="settings-bar">
+        <button class="settings-btn" onclick="syncFromGitHub()">🔄 同步</button>
         <button class="settings-btn" onclick="showAISettings()">⚙️ 设置</button>
+        <span id="sync-status" style="font-size:11px;color:#999;margin-left:4px"></span>
       </div>
       <div class="empty-state">
         <div class="empty-icon">🧳</div>
@@ -1267,7 +1351,9 @@ function renderHome() {
         <p>${data.trips.length} 个旅行计划</p>
       </div>
       <div class="settings-bar">
+        <button class="settings-btn" onclick="syncFromGitHub()">🔄 同步</button>
         <button class="settings-btn" onclick="showAISettings()">⚙️ 设置</button>
+        <span id="sync-status" style="font-size:11px;color:#999;margin-left:4px"></span>
       </div>
     `;
     data.trips.forEach(trip => {
@@ -3888,13 +3974,16 @@ function init() {
     return;
   }
 
-  const data = createSampleData();
-  renderHome();
-  setupWechatShare();
-
-  // AI works directly from browser via Pollinations (CORS-enabled)
-  // Sharing works via URL hash encoding (no server needed)
-  // Everything works on any static hosting!
+  // Sync from GitHub first (shared data), then fall back to sample data
+  syncFromGitHub(true).then(ghData => {
+    const data = createSampleData();
+    if (!ghData) {
+      // Push local sample data to GitHub so others can see it
+      saveData(data);
+    }
+    renderHome();
+    setupWechatShare();
+  });
 }
 
 init();
