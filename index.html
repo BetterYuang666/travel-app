@@ -771,7 +771,7 @@ const GITHUB_RAW = 'https://raw.githubusercontent.com/BetterYuang666/travel-app/
 const GITHUB_API = 'https://api.github.com/repos/BetterYuang666/travel-app/contents/data/trips.json';
 const GITHUB_TOKEN = (()=>{const p=['gh','p_0KrscuZNgvEzvZZT7dkZ0UsvjzHc713','crgAY'];return p.join('');})();
 
-let _githubSha = null, _syncPending = false, _syncTimer = null;
+let _githubSha = null, _syncPending = false;
 
 function loadData() {
   try {
@@ -780,106 +780,145 @@ function loadData() {
   } catch(e) { return { trips: [], activeTripId: null }; }
 }
 
-// Pull latest data from GitHub (public URL, no auth)
-// Flushes any pending local save first to avoid overwriting
-async function syncFromGitHub(silent) {
-  // Flush any pending local save immediately before pulling
-  if (_syncTimer) { clearTimeout(_syncTimer); _syncTimer = null; }
-  if (_syncPending) {
-    updateSyncStatus('⏳ 先保存...');
-    // Wait for pending push to complete (max 10s)
-    for (let i = 0; i < 20 && _syncPending; i++) {
-      await new Promise(r => setTimeout(r, 500));
-    }
-  } else {
-    // Also push current local data if not yet saved
-    const localData = loadData();
-    if (localData && localData.trips && localData.trips.length > 0) {
-      await pushToGitHub(localData);
-      // Wait briefly for push to complete
-      let waited = 0;
-      while (_syncPending && waited < 10000) {
-        await new Promise(r => setTimeout(r, 500));
-        waited += 500;
-      }
-    }
-  }
-
-  try {
-    const resp = await fetchWithTimeout(GITHUB_RAW + '?t=' + Date.now(), 10000);
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    if (data && data.trips) {
-      _githubSha = data._sha;
-      delete data._sha;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-      if (!silent) {
-        updateSyncStatus('✅ 已同步');
-        const ap = document.querySelector('.page.active');
-        if (ap && ap.id === 'home-page') renderHome();
-        else if (ap && ap.id === 'itinerary-page') renderItinerary();
-        else if (ap && ap.id === 'cost-page') renderCost();
-      }
-      return data;
-    }
-  } catch(e) { if (!silent) updateSyncStatus('⚠️ 离线'); }
-  return null;
-}
-
+// Save locally (always safe). Push to GitHub in background.
 function saveData(data) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch(e) {}
-  if (_syncTimer) clearTimeout(_syncTimer);
-  _syncTimer = setTimeout(() => pushToGitHub(data), 1500);
+  pushToGitHub(data); // fire-and-forget (debounced internally)
 }
 
+let _pushTimer = null;
 async function pushToGitHub(data) {
-  if (_syncPending) return;
-  _syncPending = true;
-  try {
-    if (!_githubSha) {
-      try {
-        const r = await fetchWithTimeout(GITHUB_API, 8000);
-        if (r.ok) { const j = await r.json(); _githubSha = j.sha; }
-      } catch(e) {}
-    }
-    const clean = JSON.parse(JSON.stringify(data));
-    clean._sha = _githubSha || undefined;
-    const body = {
-      message: 'Update trips',
-      content: btoa(unescape(encodeURIComponent(JSON.stringify(clean)))),
-      branch: 'main'
-    };
-    if (_githubSha) body.sha = _githubSha;
+  if (_pushTimer) clearTimeout(_pushTimer);
+  _pushTimer = setTimeout(async () => {
+    if (_syncPending) return;
+    _syncPending = true;
+    try {
+      // Get latest SHA from GitHub
+      let sha = _githubSha;
+      if (!sha) {
+        try {
+          const r = await fetchWithTimeout(GITHUB_API, 8000);
+          if (r.ok) { const j = await r.json(); sha = j.sha; }
+        } catch(e) {}
+      }
 
-    const resp = await fetch(GITHUB_API, {
-      method: 'PUT',
-      headers: {
-        'Authorization': 'token ' + GITHUB_TOKEN,
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
-      body: JSON.stringify(body)
+      const clean = JSON.parse(JSON.stringify(data));
+      delete clean._sha;
+      const body = {
+        message: 'Update trips',
+        content: btoa(unescape(encodeURIComponent(JSON.stringify(clean)))),
+        branch: 'main'
+      };
+      if (sha) body.sha = sha;
+
+      const resp = await fetch(GITHUB_API, {
+        method: 'PUT',
+        headers: {
+          'Authorization': 'token ' + GITHUB_TOKEN,
+          'Content-Type': 'application/json',
+          'Accept': 'application/vnd.github.v3+json'
+        },
+        body: JSON.stringify(body)
+      });
+
+      if (resp.ok) {
+        const j = await resp.json();
+        _githubSha = j.content?.sha;
+        updateSyncStatus('✅ 已保存');
+      } else if (resp.status === 422) {
+        // SHA conflict: fetch fresh SHA, retry once
+        const r2 = await fetchWithTimeout(GITHUB_API, 8000);
+        if (r2.ok) { const j2 = await r2.json(); _githubSha = j2.sha; }
+        _syncPending = false;
+        return pushToGitHub(data); // retry
+      } else {
+        updateSyncStatus('⚠️ 保存失败');
+      }
+    } catch(e) { updateSyncStatus('⚠️ 离线'); }
+    _syncPending = false;
+  }, 1000);
+}
+
+// Pull from GitHub and MERGE with local data (never lose local trips)
+async function syncFromGitHub(silent) {
+  // Flush pending push first
+  if (_pushTimer) { clearTimeout(_pushTimer); _pushTimer = null; }
+
+  // Push current local data immediately
+  const localData = loadData();
+  if (localData.trips.length > 0) {
+    await new Promise(resolve => {
+      pushToGitHub(localData);
+      // Override timer to fire immediately
+      if (_pushTimer) { clearTimeout(_pushTimer); _pushTimer = null; }
+      // Wait for the push attempt
+      let count = 0;
+      const check = setInterval(() => {
+        count++;
+        if (!_syncPending || count > 30) { clearInterval(check); resolve(); }
+      }, 200);
     });
-    if (resp.ok) {
-      const j = await resp.json();
-      _githubSha = j.content?.sha;
-      updateSyncStatus('✅ 已保存');
-    } else if (resp.status === 422) {
-      updateSyncStatus('🔄 重新同步...');
-      const fresh = await syncFromGitHub(true);
-      if (fresh) { _githubSha = null; _syncPending = false; pushToGitHub(fresh); return; }
-    } else {
-      updateSyncStatus('⚠️ 保存失败');
+  }
+
+  // Now pull from GitHub and merge
+  try {
+    updateSyncStatus('⏳ 同步中...');
+    const resp = await fetchWithTimeout(GITHUB_API + '?t=' + Date.now(), 10000);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const apiData = await resp.json();
+    if (!apiData.content) throw new Error('No content');
+
+    // Decode base64 content from API (more reliable than raw URL — no CDN cache)
+    const decoded = JSON.parse(decodeURIComponent(escape(atob(apiData.content))));
+    _githubSha = apiData.sha;
+    delete decoded._sha;
+
+    // MERGE: keep all local trips, update matches from GitHub
+    const merged = { trips: [], activeTripId: localData.activeTripId || decoded.activeTripId };
+    const tripMap = new Map();
+
+    // Add local trips first (priority)
+    localData.trips.forEach(t => tripMap.set(t.id, t));
+    // Add GitHub trips that don't exist locally
+    decoded.trips.forEach(t => {
+      if (!tripMap.has(t.id)) tripMap.set(t.id, t);
+    });
+
+    merged.trips = Array.from(tripMap.values());
+    if (!merged.activeTripId || !merged.trips.find(t => t.id === merged.activeTripId)) {
+      merged.activeTripId = merged.trips[0]?.id || null;
     }
-  } catch(e) { updateSyncStatus('⚠️ 离线'); }
-  _syncPending = false;
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+    updateSyncStatus('✅ 已同步');
+
+    // Refresh UI
+    const ap = document.querySelector('.page.active');
+    if (ap && ap.id === 'home-page') renderHome();
+    else if (ap && ap.id === 'itinerary-page') renderItinerary();
+    else if (ap && ap.id === 'cost-page') renderCost();
+
+    // Push merged data so GitHub has everything
+    saveData(merged);
+    return merged;
+
+  } catch(e) {
+    if (!silent) updateSyncStatus('⚠️ ' + (e.message || '离线'));
+    // Keep local data — never lose it
+    return localData;
+  }
 }
 
 function updateSyncStatus(text) {
   const el = document.getElementById('sync-status');
   if (el) {
     el.textContent = text;
-    if (text === '✅ 已保存') setTimeout(() => { const e = document.getElementById('sync-status'); if (e && e.textContent === '✅ 已保存') e.textContent = ''; }, 5000);
+    if (text === '✅ 已保存' || text === '✅ 已同步') {
+      setTimeout(() => {
+        const e = document.getElementById('sync-status');
+        if (e && (e.textContent === '✅ 已保存' || e.textContent === '✅ 已同步')) e.textContent = '';
+      }, 5000);
+    }
   }
 }
 
