@@ -745,8 +745,8 @@ body {
   <button class="tab-item" data-tab="map" onclick="switchTab('map')">
     <span class="tab-icon">🗺️</span><span class="tab-label">地图</span>
   </button>
-  <button class="tab-item sync-btn" id="sync-tab-btn" onclick="doSync()" title="刷新同步">
-    <span class="tab-icon" id="sync-icon">🔄</span><span class="tab-label" id="sync-label">同步</span>
+  <button class="tab-item sync-btn" id="sync-tab-btn" onclick="refreshFromGitHub()" title="从云端刷新">
+    <span class="tab-icon" id="sync-icon">🔄</span><span class="tab-label" id="sync-label">刷新</span>
   </button>
 </div>
 
@@ -793,103 +793,116 @@ function saveData(data) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch(e) {}
 }
 
-// Manual sync: upload local → download remote → merge (never loses data)
-async function syncFromGitHub(silent) {
+
+// UPLOAD: push local data to GitHub (top button — save to cloud)
+async function uploadToGitHub() {
+  if (_syncPending) return;
+  _syncPending = true;
+  const statusEl = document.getElementById('sync-status');
+  try {
+    if (statusEl) statusEl.textContent = '⏳ 保存中...';
+
+    const localData = loadData();
+    const clean = JSON.parse(JSON.stringify(localData));
+    delete clean._sha;
+
+    let sha = _githubSha;
+    if (!sha) {
+      try {
+        const r = await fetch(GITHUB_API, {
+          headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+        });
+        if (r.ok) { const j = await r.json(); sha = j.sha; }
+      } catch(e) {}
+    }
+
+    const body = {
+      message: 'Save to cloud',
+      content: btoa(unescape(encodeURIComponent(JSON.stringify(clean)))),
+      branch: 'main'
+    };
+    if (sha) body.sha = sha;
+
+    const resp = await fetch(GITHUB_API, {
+      method: 'PUT',
+      headers: {
+        'Authorization': 'token ' + GITHUB_TOKEN,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (resp.ok) {
+      const j = await resp.json();
+      _githubSha = j.content?.sha;
+      if (statusEl) { statusEl.textContent = '✅ 已保存到云端'; }
+      setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 4000);
+    } else if (resp.status === 422) {
+      // Conflict: refresh SHA, retry once
+      const r = await fetch(GITHUB_API, {
+        headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+      });
+      if (r.ok) {
+        const j = await r.json();
+        _githubSha = j.sha;
+        body.sha = j.sha;
+        const retry = await fetch(GITHUB_API, {
+          method: 'PUT',
+          headers: {
+            'Authorization': 'token ' + GITHUB_TOKEN,
+            'Content-Type': 'application/json',
+            'Accept': 'application/vnd.github.v3+json'
+          },
+          body: JSON.stringify(body)
+        });
+        if (retry.ok) {
+          _githubSha = (await retry.json()).content?.sha;
+          if (statusEl) { statusEl.textContent = '✅ 已保存到云端'; }
+          setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 4000);
+        } else {
+          if (statusEl) statusEl.textContent = '⚠️ 保存失败（请重试）';
+        }
+      } else {
+        if (statusEl) statusEl.textContent = '⚠️ 保存失败';
+      }
+    } else {
+      if (statusEl) statusEl.textContent = '⚠️ 保存失败 (' + resp.status + ')';
+    }
+  } catch(e) {
+    if (statusEl) statusEl.textContent = '⚠️ 网络错误';
+  } finally {
+    _syncPending = false;
+  }
+}
+
+// REFRESH: pull from GitHub and merge (bottom tab button — refresh from cloud)
+async function refreshFromGitHub() {
   if (_syncPending) return;
   _syncPending = true;
 
-  const btn = document.getElementById('sync-tab-btn');
   const icon = document.getElementById('sync-icon');
   const label = document.getElementById('sync-label');
 
   try {
-    // Step 1: Upload local data to GitHub (skip on silent to prevent overwrites)
-    const doUpload = !silent;
-    if (doUpload) {
-      if (icon) icon.textContent = '\u23EB';
-      if (label) label.textContent = '\u4E0A\u4F20';
-    }
+    if (icon) icon.textContent = '\u23EC';
+    if (label) label.textContent = '拉取中';
 
     const localData = loadData();
 
-    if (doUpload) {
-      const clean = JSON.parse(JSON.stringify(localData));
-      delete clean._sha;
-
-      let sha = _githubSha;
-      if (!sha) {
-        try {
-          const r = await fetch(GITHUB_API, {
-            headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
-          });
-          if (r.ok) { const j = await r.json(); sha = j.sha; }
-        } catch(e) {}
-      }
-
-      const body = {
-        message: 'Manual sync',
-        content: btoa(unescape(encodeURIComponent(JSON.stringify(clean)))),
-        branch: 'main'
-      };
-      if (sha) body.sha = sha;
-
-      const pushResp = await fetch(GITHUB_API, {
-        method: 'PUT',
-        headers: {
-          'Authorization': 'token ' + GITHUB_TOKEN,
-          'Content-Type': 'application/json',
-          'Accept': 'application/vnd.github.v3+json'
-        },
-        body: JSON.stringify(body)
-      });
-
-      if (pushResp.ok) {
-        const j = await pushResp.json();
-        _githubSha = j.content?.sha;
-      } else if (pushResp.status === 422) {
-        const r = await fetch(GITHUB_API, {
-          headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
-        });
-        if (r.ok) {
-          const j = await r.json();
-          _githubSha = j.sha;
-          body.sha = j.sha;
-          const retry = await fetch(GITHUB_API, {
-            method: 'PUT',
-            headers: {
-              'Authorization': 'token ' + GITHUB_TOKEN,
-              'Content-Type': 'application/json',
-              'Accept': 'application/vnd.github.v3+json'
-            },
-            body: JSON.stringify(body)
-          });
-          if (retry.ok) {
-            const rj = await retry.json();
-            _githubSha = rj.content?.sha;
-          }
-        }
-      }
-    }
-
-    // Step 2: Download from GitHub
-    if (!silent) {
-      if (icon) icon.textContent = '\u23EC';
-      if (label) label.textContent = '下载';
-    }
-
-    const pullResp = await fetch(GITHUB_API + '?t=' + Date.now(), {
+    const resp = await fetch(GITHUB_API + '?t=' + Date.now(), {
       headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
     });
-    if (!pullResp.ok) throw new Error('HTTP ' + pullResp.status);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
 
-    const apiData = await pullResp.json();
-    if (!apiData.content) throw new Error('No content');
+    const apiData = await resp.json();
+    if (!apiData.content) throw new Error('No data');
 
     const githubData = JSON.parse(decodeURIComponent(escape(atob(apiData.content))));
     _githubSha = apiData.sha;
     delete githubData._sha;
 
-    // Step 3: Merge — keep ALL trips from both local and remote
+    // Merge: keep local + add remote (never lose data)
     const merged = { trips: [], activeTripId: localData.activeTripId || githubData.activeTripId };
     const tripMap = new Map();
     localData.trips.forEach(t => tripMap.set(t.id, t));
@@ -901,66 +914,54 @@ async function syncFromGitHub(silent) {
 
     localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
 
-    if (!silent) {
-      if (icon) icon.textContent = '\u2705';
-      if (label) label.textContent = '已同步';
-      const ap = document.querySelector('.page.active');
-      if (ap && ap.id === 'home-page') renderHome();
-      else if (ap && ap.id === 'itinerary-page') renderItinerary();
-      else if (ap && ap.id === 'cost-page') renderCost();
-      setTimeout(() => {
-        const ic = document.getElementById('sync-icon');
-        const lb = document.getElementById('sync-label');
-        if (ic) ic.textContent = '🔄';
-        if (lb) lb.textContent = '同步';
-      }, 3000);
-    }
+    if (icon) icon.textContent = '\u2705';
+    if (label) label.textContent = '已刷新';
+    const ap = document.querySelector('.page.active');
+    if (ap && ap.id === 'home-page') renderHome();
+    else if (ap && ap.id === 'itinerary-page') renderItinerary();
+    else if (ap && ap.id === 'cost-page') renderCost();
+    setTimeout(() => {
+      if (icon) icon.textContent = '\u{1F504}';
+      if (label) label.textContent = '刷新';
+    }, 3000);
 
-    return merged;
   } catch(e) {
-    if (!silent) {
-      if (icon) icon.textContent = '\u26A0';
-      if (label) label.textContent = '失败';
-      setTimeout(() => {
-        const ic = document.getElementById('sync-icon');
-        const lb = document.getElementById('sync-label');
-        if (ic) ic.textContent = '🔄';
-        if (lb) lb.textContent = '同步';
-      }, 3000);
-    }
-    return loadData();
+    if (icon) icon.textContent = '\u26A0';
+    if (label) label.textContent = '失败';
+    setTimeout(() => {
+      if (icon) icon.textContent = '\u{1F504}';
+      if (label) label.textContent = '刷新';
+    }, 3000);
   } finally {
     _syncPending = false;
   }
 }
-async function doSync() {
-  const btn = document.getElementById('sync-tab-btn');
-  const icon = document.getElementById('sync-icon');
-  const label = document.getElementById('sync-label');
-  if (btn) { btn.classList.add('syncing'); btn.classList.remove('synced','error'); }
-  if (icon) icon.textContent = '⏳';
-  if (label) label.textContent = '同步中';
 
+// Silent refresh for init (no UI feedback, no push)
+async function silentRefresh() {
   try {
-    await syncFromGitHub(false);
-    if (btn) { btn.classList.remove('syncing'); btn.classList.add('synced'); }
-    if (icon) icon.textContent = '✅';
-    if (label) label.textContent = '已同步';
-    setTimeout(() => {
-      if (btn) { btn.classList.remove('synced'); }
-      if (icon) icon.textContent = '🔄';
-      if (label) label.textContent = '同步';
-    }, 3000);
-  } catch(e) {
-    if (btn) { btn.classList.remove('syncing'); btn.classList.add('error'); }
-    if (icon) icon.textContent = '⚠️️';
-    if (label) label.textContent = '失败';
-    setTimeout(() => {
-      if (btn) { btn.classList.remove('error'); }
-      if (icon) icon.textContent = '🔄';
-      if (label) label.textContent = '同步';
-    }, 3000);
-  }
+    const localData = loadData();
+    const resp = await fetch(GITHUB_API + '?t=' + Date.now(), {
+      headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+    });
+    if (!resp.ok) return null;
+    const apiData = await resp.json();
+    if (!apiData.content) return null;
+    const githubData = JSON.parse(decodeURIComponent(escape(atob(apiData.content))));
+    _githubSha = apiData.sha;
+    delete githubData._sha;
+
+    const merged = { trips: [], activeTripId: localData.activeTripId || githubData.activeTripId };
+    const tripMap = new Map();
+    localData.trips.forEach(t => tripMap.set(t.id, t));
+    githubData.trips.forEach(t => { if (!tripMap.has(t.id)) tripMap.set(t.id, t); });
+    merged.trips = Array.from(tripMap.values());
+    if (!merged.activeTripId || !merged.trips.find(t => t.id === merged.activeTripId)) {
+      merged.activeTripId = merged.trips[0]?.id || null;
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+    return merged;
+  } catch(e) { return null; }
 }
 
 function updateSyncStatus(text) {
@@ -1446,7 +1447,7 @@ function renderHome() {
         <p>规划你的完美旅程</p>
       </div>
       <div class="settings-bar">
-        <button class="settings-btn" onclick="syncFromGitHub()">🔄 同步</button>
+        <button class="settings-btn" onclick="uploadToGitHub()">💾 保存到云端</button>
         <button class="settings-btn" onclick="showAISettings()">⚙️ 设置</button>
         <span id="sync-status" style="font-size:11px;color:#999;margin-left:4px"></span>
       </div>
@@ -1467,7 +1468,7 @@ function renderHome() {
         <p>${data.trips.length} 个旅行计划</p>
       </div>
       <div class="settings-bar">
-        <button class="settings-btn" onclick="syncFromGitHub()">🔄 同步</button>
+        <button class="settings-btn" onclick="uploadToGitHub()">💾 保存到云端</button>
         <button class="settings-btn" onclick="showAISettings()">⚙️ 设置</button>
         <span id="sync-status" style="font-size:11px;color:#999;margin-left:4px"></span>
       </div>
@@ -4091,7 +4092,7 @@ function init() {
   }
 
   // Sync from GitHub first (shared data), then fall back to sample data
-  syncFromGitHub(true).then(ghData => {
+  silentRefresh().then(ghData => {
     const data = createSampleData();
     if (!ghData) saveData(data);
     renderHome();
