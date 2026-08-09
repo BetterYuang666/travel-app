@@ -778,6 +778,7 @@ const GITHUB_RAW = 'https://raw.githubusercontent.com/BetterYuang666/travel-app/
 const GITHUB_API = 'https://api.github.com/repos/BetterYuang666/travel-app/contents/data/trips.json';
 const GITHUB_TOKEN = (()=>{const p=['gh','p_0KrscuZNgvEzvZZT7dkZ0UsvjzHc713','crgAY'];return p.join('');})();
 
+
 let _githubSha = null, _syncPending = false;
 
 function loadData() {
@@ -787,20 +788,34 @@ function loadData() {
   } catch(e) { return { trips: [], activeTripId: null }; }
 }
 
-// Save locally (always safe). Push to GitHub in background.
+// Save locally only — NO auto-push (prevents accidental overwrites)
 function saveData(data) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch(e) {}
-  pushToGitHub(data); // fire-and-forget (debounced internally)
 }
 
-let _pushTimer = null;
-async function pushToGitHub(data) {
-  if (_pushTimer) clearTimeout(_pushTimer);
-  _pushTimer = setTimeout(async () => {
-    if (_syncPending) return;
-    _syncPending = true;
-    try {
-      // Get latest SHA from GitHub (with auth to avoid 403)
+// Manual sync: upload local → download remote → merge (never loses data)
+async function syncFromGitHub(silent) {
+  if (_syncPending) return;
+  _syncPending = true;
+
+  const btn = document.getElementById('sync-tab-btn');
+  const icon = document.getElementById('sync-icon');
+  const label = document.getElementById('sync-label');
+
+  try {
+    // Step 1: Upload local data to GitHub (skip on silent to prevent overwrites)
+    const doUpload = !silent;
+    if (doUpload) {
+      if (icon) icon.textContent = '\u23EB';
+      if (label) label.textContent = '\u4E0A\u4F20';
+    }
+
+    const localData = loadData();
+
+    if (doUpload) {
+      const clean = JSON.parse(JSON.stringify(localData));
+      delete clean._sha;
+
       let sha = _githubSha;
       if (!sha) {
         try {
@@ -811,16 +826,14 @@ async function pushToGitHub(data) {
         } catch(e) {}
       }
 
-      const clean = JSON.parse(JSON.stringify(data));
-      delete clean._sha;
       const body = {
-        message: 'Update trips',
+        message: 'Manual sync',
         content: btoa(unescape(encodeURIComponent(JSON.stringify(clean)))),
         branch: 'main'
       };
       if (sha) body.sha = sha;
 
-      const resp = await fetch(GITHUB_API, {
+      const pushResp = await fetch(GITHUB_API, {
         method: 'PUT',
         headers: {
           'Authorization': 'token ' + GITHUB_TOKEN,
@@ -830,103 +843,96 @@ async function pushToGitHub(data) {
         body: JSON.stringify(body)
       });
 
-      if (resp.ok) {
-        const j = await resp.json();
+      if (pushResp.ok) {
+        const j = await pushResp.json();
         _githubSha = j.content?.sha;
-        updateSyncStatus('✅ 已保存');
-      } else if (resp.status === 422) {
-        // SHA conflict: fetch fresh SHA with auth, retry once
-        const r2 = await fetch(GITHUB_API, {
+      } else if (pushResp.status === 422) {
+        const r = await fetch(GITHUB_API, {
           headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
         });
-        if (r2.ok) { const j2 = await r2.json(); _githubSha = j2.sha; }
-        _syncPending = false;
-        return pushToGitHub(data); // retry
-      } else {
-        updateSyncStatus('⚠️ 保存失败');
+        if (r.ok) {
+          const j = await r.json();
+          _githubSha = j.sha;
+          body.sha = j.sha;
+          const retry = await fetch(GITHUB_API, {
+            method: 'PUT',
+            headers: {
+              'Authorization': 'token ' + GITHUB_TOKEN,
+              'Content-Type': 'application/json',
+              'Accept': 'application/vnd.github.v3+json'
+            },
+            body: JSON.stringify(body)
+          });
+          if (retry.ok) {
+            const rj = await retry.json();
+            _githubSha = rj.content?.sha;
+          }
+        }
       }
-    } catch(e) { updateSyncStatus('⚠️ 离线'); }
-    _syncPending = false;
-  }, 1000);
-}
-
-// Pull from GitHub and MERGE with local data (never lose local trips)
-async function syncFromGitHub(silent) {
-  // Flush pending push first
-  if (_pushTimer) { clearTimeout(_pushTimer); _pushTimer = null; }
-
-  // Push current local data immediately
-  const localData = loadData();
-  if (localData.trips.length > 0) {
-    await new Promise(resolve => {
-      pushToGitHub(localData);
-      if (_pushTimer) { clearTimeout(_pushTimer); _pushTimer = null; }
-      let count = 0;
-      const check = setInterval(() => {
-        count++;
-        if (!_syncPending || count > 30) { clearInterval(check); resolve(); }
-      }, 200);
-    });
-  }
-
-  // Now pull from GitHub API (with auth token to avoid 403 rate limit)
-  try {
-    updateSyncStatus('⏳ 同步中...');
-    const headers = {
-      'Authorization': 'token ' + GITHUB_TOKEN,
-      'Accept': 'application/vnd.github.v3+json'
-    };
-    // Use API with auth — no CDN cache, no rate limit (5000/hr)
-    const resp = await fetch(GITHUB_API + '?t=' + Date.now(), { headers });
-    if (!resp.ok) {
-      // Fallback to raw URL if API fails
-      if (resp.status === 403 || resp.status === 401) {
-        updateSyncStatus('⏳ 备用源...');
-        const rawResp = await fetchWithTimeout(GITHUB_RAW + '?t=' + Date.now(), 10000);
-        if (!rawResp.ok) throw new Error('HTTP ' + rawResp.status);
-        const rawData = await rawResp.json();
-        return mergeAndSave(rawData, localData, silent);
-      }
-      throw new Error('HTTP ' + resp.status);
     }
-    const apiData = await resp.json();
+
+    // Step 2: Download from GitHub
+    if (!silent) {
+      if (icon) icon.textContent = '\u23EC';
+      if (label) label.textContent = '下载';
+    }
+
+    const pullResp = await fetch(GITHUB_API + '?t=' + Date.now(), {
+      headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+    });
+    if (!pullResp.ok) throw new Error('HTTP ' + pullResp.status);
+
+    const apiData = await pullResp.json();
     if (!apiData.content) throw new Error('No content');
 
-    const decoded = JSON.parse(decodeURIComponent(escape(atob(apiData.content))));
+    const githubData = JSON.parse(decodeURIComponent(escape(atob(apiData.content))));
     _githubSha = apiData.sha;
-    delete decoded._sha;
-    return mergeAndSave(decoded, localData, silent);
+    delete githubData._sha;
 
+    // Step 3: Merge — keep ALL trips from both local and remote
+    const merged = { trips: [], activeTripId: localData.activeTripId || githubData.activeTripId };
+    const tripMap = new Map();
+    localData.trips.forEach(t => tripMap.set(t.id, t));
+    githubData.trips.forEach(t => { if (!tripMap.has(t.id)) tripMap.set(t.id, t); });
+    merged.trips = Array.from(tripMap.values());
+    if (!merged.activeTripId || !merged.trips.find(t => t.id === merged.activeTripId)) {
+      merged.activeTripId = merged.trips[0]?.id || null;
+    }
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+
+    if (!silent) {
+      if (icon) icon.textContent = '\u2705';
+      if (label) label.textContent = '已同步';
+      const ap = document.querySelector('.page.active');
+      if (ap && ap.id === 'home-page') renderHome();
+      else if (ap && ap.id === 'itinerary-page') renderItinerary();
+      else if (ap && ap.id === 'cost-page') renderCost();
+      setTimeout(() => {
+        const ic = document.getElementById('sync-icon');
+        const lb = document.getElementById('sync-label');
+        if (ic) ic.textContent = '🔄';
+        if (lb) lb.textContent = '同步';
+      }, 3000);
+    }
+
+    return merged;
   } catch(e) {
-    if (!silent) updateSyncStatus('⚠️ ' + (e.message || '离线'));
-    return localData;
+    if (!silent) {
+      if (icon) icon.textContent = '\u26A0';
+      if (label) label.textContent = '失败';
+      setTimeout(() => {
+        const ic = document.getElementById('sync-icon');
+        const lb = document.getElementById('sync-label');
+        if (ic) ic.textContent = '🔄';
+        if (lb) lb.textContent = '同步';
+      }, 3000);
+    }
+    return loadData();
+  } finally {
+    _syncPending = false;
   }
 }
-
-function mergeAndSave(githubData, localData, silent) {
-  const merged = { trips: [], activeTripId: localData.activeTripId || githubData.activeTripId };
-  const tripMap = new Map();
-  localData.trips.forEach(t => tripMap.set(t.id, t));
-  githubData.trips.forEach(t => {
-    if (!tripMap.has(t.id)) tripMap.set(t.id, t);
-  });
-  merged.trips = Array.from(tripMap.values());
-  if (!merged.activeTripId || !merged.trips.find(t => t.id === merged.activeTripId)) {
-    merged.activeTripId = merged.trips[0]?.id || null;
-  }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-  if (!silent) {
-    updateSyncStatus('✅ 已同步');
-    const ap = document.querySelector('.page.active');
-    if (ap && ap.id === 'home-page') renderHome();
-    else if (ap && ap.id === 'itinerary-page') renderItinerary();
-    else if (ap && ap.id === 'cost-page') renderCost();
-  }
-  saveData(merged);
-  return merged;
-}
-
-// Manual sync with visible feedback on the tab bar button
 async function doSync() {
   const btn = document.getElementById('sync-tab-btn');
   const icon = document.getElementById('sync-icon');
@@ -947,7 +953,7 @@ async function doSync() {
     }, 3000);
   } catch(e) {
     if (btn) { btn.classList.remove('syncing'); btn.classList.add('error'); }
-    if (icon) icon.textContent = '⚠️';
+    if (icon) icon.textContent = '⚠️️';
     if (label) label.textContent = '失败';
     setTimeout(() => {
       if (btn) { btn.classList.remove('error'); }
@@ -3212,9 +3218,9 @@ async function geocodeSearch(isAuto) {
         found = true;
         if (isAuto) suggestAIStory();
       } else if (data.infocode === '10021') {
-        if (hint) hint.innerHTML = '⚠️ 高德Key QPS超限，请稍后重试';
+        if (hint) hint.innerHTML = '⚠️️ 高德Key QPS超限，请稍后重试';
       } else if (data.infocode === '30001') {
-        if (hint) hint.innerHTML = '⚠️ 高德Key未开通"地理编码"服务<br><small style="color:#999">请到 <a href="https://console.amap.com/dev/key/app" target="_blank">高德控制台</a> 开通"地理编码"API服务</small>';
+        if (hint) hint.innerHTML = '⚠️️ 高德Key未开通"地理编码"服务<br><small style="color:#999">请到 <a href="https://console.amap.com/dev/key/app" target="_blank">高德控制台</a> 开通"地理编码"API服务</small>';
       } else {
         // Amap returned no results, will fall through to Photon
       }
@@ -3269,7 +3275,7 @@ async function searchPOIDetail() {
   const key = getAmapKey();
   if (!key) {
     card.style.display = 'block';
-    card.querySelector('.poi-name').innerHTML = '⚠️ 请先在设置中配置高德Key';
+    card.querySelector('.poi-name').innerHTML = '⚠️️ 请先在设置中配置高德Key';
     return;
   }
 
@@ -3482,7 +3488,7 @@ async function fetchAndDisplayRoute(dayNum, actIdx, fromId, toId) {
       btn.textContent = '✅';
       setTimeout(() => { btn.textContent = '查询路线'; }, 2000);
     } else {
-      routeEl.querySelector('.route-mode').textContent = '⚠️ 无路线';
+      routeEl.querySelector('.route-mode').textContent = '⚠️️ 无路线';
       routeEl.querySelector('.route-dist').textContent = '';
       routeEl.querySelector('.route-time').textContent = '';
       btn.textContent = '重试';
@@ -3698,7 +3704,7 @@ async function aiGenerateStory() {
     // Fallback: template-based story
     const trip = getActiveTrip();
     storyArea.value = generateTemplateStory(placeName, 'sightseeing', trip?.destination || '');
-    if (hint) hint.innerHTML = '⚠️ AI 暂时繁忙，已使用智能模板<br><small style="color:#999">可手动修改或稍后重试</small>';
+    if (hint) hint.innerHTML = '⚠️️ AI 暂时繁忙，已使用智能模板<br><small style="color:#999">可手动修改或稍后重试</small>';
   } finally {
     if (btn) { btn.classList.remove('loading'); btn.innerHTML = '🤖 生成故事'; }
   }
@@ -4092,14 +4098,6 @@ function init() {
     setupWechatShare();
   });
 
-  // Auto-sync when user switches back to this tab (handles multi-device)
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) syncFromGitHub(true);
-  });
-  // Also auto-sync every 60 seconds
-  setInterval(() => {
-    if (!document.hidden) syncFromGitHub(true);
-  }, 60000);
 }
 
 init();
