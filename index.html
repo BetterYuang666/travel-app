@@ -781,7 +781,30 @@ function loadData() {
 }
 
 // Pull latest data from GitHub (public URL, no auth)
+// Flushes any pending local save first to avoid overwriting
 async function syncFromGitHub(silent) {
+  // Flush any pending local save immediately before pulling
+  if (_syncTimer) { clearTimeout(_syncTimer); _syncTimer = null; }
+  if (_syncPending) {
+    updateSyncStatus('⏳ 先保存...');
+    // Wait for pending push to complete (max 10s)
+    for (let i = 0; i < 20 && _syncPending; i++) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  } else {
+    // Also push current local data if not yet saved
+    const localData = loadData();
+    if (localData && localData.trips && localData.trips.length > 0) {
+      await pushToGitHub(localData);
+      // Wait briefly for push to complete
+      let waited = 0;
+      while (_syncPending && waited < 10000) {
+        await new Promise(r => setTimeout(r, 500));
+        waited += 500;
+      }
+    }
+  }
+
   try {
     const resp = await fetchWithTimeout(GITHUB_RAW + '?t=' + Date.now(), 10000);
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
