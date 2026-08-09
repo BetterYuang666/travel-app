@@ -793,11 +793,13 @@ async function pushToGitHub(data) {
     if (_syncPending) return;
     _syncPending = true;
     try {
-      // Get latest SHA from GitHub
+      // Get latest SHA from GitHub (with auth to avoid 403)
       let sha = _githubSha;
       if (!sha) {
         try {
-          const r = await fetchWithTimeout(GITHUB_API, 8000);
+          const r = await fetch(GITHUB_API, {
+            headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+          });
           if (r.ok) { const j = await r.json(); sha = j.sha; }
         } catch(e) {}
       }
@@ -826,8 +828,10 @@ async function pushToGitHub(data) {
         _githubSha = j.content?.sha;
         updateSyncStatus('✅ 已保存');
       } else if (resp.status === 422) {
-        // SHA conflict: fetch fresh SHA, retry once
-        const r2 = await fetchWithTimeout(GITHUB_API, 8000);
+        // SHA conflict: fetch fresh SHA with auth, retry once
+        const r2 = await fetch(GITHUB_API, {
+          headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+        });
         if (r2.ok) { const j2 = await r2.json(); _githubSha = j2.sha; }
         _syncPending = false;
         return pushToGitHub(data); // retry
@@ -849,9 +853,7 @@ async function syncFromGitHub(silent) {
   if (localData.trips.length > 0) {
     await new Promise(resolve => {
       pushToGitHub(localData);
-      // Override timer to fire immediately
       if (_pushTimer) { clearTimeout(_pushTimer); _pushTimer = null; }
-      // Wait for the push attempt
       let count = 0;
       const check = setInterval(() => {
         count++;
@@ -860,53 +862,61 @@ async function syncFromGitHub(silent) {
     });
   }
 
-  // Now pull from GitHub and merge
+  // Now pull from GitHub API (with auth token to avoid 403 rate limit)
   try {
     updateSyncStatus('⏳ 同步中...');
-    const resp = await fetchWithTimeout(GITHUB_API + '?t=' + Date.now(), 10000);
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const headers = {
+      'Authorization': 'token ' + GITHUB_TOKEN,
+      'Accept': 'application/vnd.github.v3+json'
+    };
+    // Use API with auth — no CDN cache, no rate limit (5000/hr)
+    const resp = await fetch(GITHUB_API + '?t=' + Date.now(), { headers });
+    if (!resp.ok) {
+      // Fallback to raw URL if API fails
+      if (resp.status === 403 || resp.status === 401) {
+        updateSyncStatus('⏳ 备用源...');
+        const rawResp = await fetchWithTimeout(GITHUB_RAW + '?t=' + Date.now(), 10000);
+        if (!rawResp.ok) throw new Error('HTTP ' + rawResp.status);
+        const rawData = await rawResp.json();
+        return mergeAndSave(rawData, localData, silent);
+      }
+      throw new Error('HTTP ' + resp.status);
+    }
     const apiData = await resp.json();
     if (!apiData.content) throw new Error('No content');
 
-    // Decode base64 content from API (more reliable than raw URL — no CDN cache)
     const decoded = JSON.parse(decodeURIComponent(escape(atob(apiData.content))));
     _githubSha = apiData.sha;
     delete decoded._sha;
+    return mergeAndSave(decoded, localData, silent);
 
-    // MERGE: keep all local trips, update matches from GitHub
-    const merged = { trips: [], activeTripId: localData.activeTripId || decoded.activeTripId };
-    const tripMap = new Map();
+  } catch(e) {
+    if (!silent) updateSyncStatus('⚠️ ' + (e.message || '离线'));
+    return localData;
+  }
+}
 
-    // Add local trips first (priority)
-    localData.trips.forEach(t => tripMap.set(t.id, t));
-    // Add GitHub trips that don't exist locally
-    decoded.trips.forEach(t => {
-      if (!tripMap.has(t.id)) tripMap.set(t.id, t);
-    });
-
-    merged.trips = Array.from(tripMap.values());
-    if (!merged.activeTripId || !merged.trips.find(t => t.id === merged.activeTripId)) {
-      merged.activeTripId = merged.trips[0]?.id || null;
-    }
-
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+function mergeAndSave(githubData, localData, silent) {
+  const merged = { trips: [], activeTripId: localData.activeTripId || githubData.activeTripId };
+  const tripMap = new Map();
+  localData.trips.forEach(t => tripMap.set(t.id, t));
+  githubData.trips.forEach(t => {
+    if (!tripMap.has(t.id)) tripMap.set(t.id, t);
+  });
+  merged.trips = Array.from(tripMap.values());
+  if (!merged.activeTripId || !merged.trips.find(t => t.id === merged.activeTripId)) {
+    merged.activeTripId = merged.trips[0]?.id || null;
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+  if (!silent) {
     updateSyncStatus('✅ 已同步');
-
-    // Refresh UI
     const ap = document.querySelector('.page.active');
     if (ap && ap.id === 'home-page') renderHome();
     else if (ap && ap.id === 'itinerary-page') renderItinerary();
     else if (ap && ap.id === 'cost-page') renderCost();
-
-    // Push merged data so GitHub has everything
-    saveData(merged);
-    return merged;
-
-  } catch(e) {
-    if (!silent) updateSyncStatus('⚠️ ' + (e.message || '离线'));
-    // Keep local data — never lose it
-    return localData;
   }
+  saveData(merged);
+  return merged;
 }
 
 function updateSyncStatus(text) {
@@ -4039,13 +4049,19 @@ function init() {
   // Sync from GitHub first (shared data), then fall back to sample data
   syncFromGitHub(true).then(ghData => {
     const data = createSampleData();
-    if (!ghData) {
-      // Push local sample data to GitHub so others can see it
-      saveData(data);
-    }
+    if (!ghData) saveData(data);
     renderHome();
     setupWechatShare();
   });
+
+  // Auto-sync when user switches back to this tab (handles multi-device)
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) syncFromGitHub(true);
+  });
+  // Also auto-sync every 60 seconds
+  setInterval(() => {
+    if (!document.hidden) syncFromGitHub(true);
+  }, 60000);
 }
 
 init();
