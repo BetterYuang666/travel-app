@@ -44,6 +44,10 @@ body {
 .tab-item.active { color: var(--green-dark); }
 .tab-icon { font-size: 22px; line-height: 1; }
 .tab-label { font-size: 11px; font-weight: 500; }
+.sync-btn { flex: 0.6 !important; opacity: 0.7; }
+.sync-btn.syncing .tab-icon { animation: spin 1s linear infinite; }
+.sync-btn.synced .tab-icon { color: var(--green); }
+.sync-btn.error .tab-icon { color: var(--red); }
 
 /* ===== PAGES ===== */
 .page { display: none; }
@@ -741,6 +745,9 @@ body {
   <button class="tab-item" data-tab="map" onclick="switchTab('map')">
     <span class="tab-icon">🗺️</span><span class="tab-label">地图</span>
   </button>
+  <button class="tab-item sync-btn" id="sync-tab-btn" onclick="doSync()" title="刷新同步">
+    <span class="tab-icon" id="sync-icon">🔄</span><span class="tab-label" id="sync-label">同步</span>
+  </button>
 </div>
 
 <script>
@@ -917,6 +924,37 @@ function mergeAndSave(githubData, localData, silent) {
   }
   saveData(merged);
   return merged;
+}
+
+// Manual sync with visible feedback on the tab bar button
+async function doSync() {
+  const btn = document.getElementById('sync-tab-btn');
+  const icon = document.getElementById('sync-icon');
+  const label = document.getElementById('sync-label');
+  if (btn) { btn.classList.add('syncing'); btn.classList.remove('synced','error'); }
+  if (icon) icon.textContent = '⏳';
+  if (label) label.textContent = '同步中';
+
+  try {
+    await syncFromGitHub(false);
+    if (btn) { btn.classList.remove('syncing'); btn.classList.add('synced'); }
+    if (icon) icon.textContent = '✅';
+    if (label) label.textContent = '已同步';
+    setTimeout(() => {
+      if (btn) { btn.classList.remove('synced'); }
+      if (icon) icon.textContent = '🔄';
+      if (label) label.textContent = '同步';
+    }, 3000);
+  } catch(e) {
+    if (btn) { btn.classList.remove('syncing'); btn.classList.add('error'); }
+    if (icon) icon.textContent = '⚠️';
+    if (label) label.textContent = '失败';
+    setTimeout(() => {
+      if (btn) { btn.classList.remove('error'); }
+      if (icon) icon.textContent = '🔄';
+      if (label) label.textContent = '同步';
+    }, 3000);
+  }
 }
 
 function updateSyncStatus(text) {
