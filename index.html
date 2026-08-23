@@ -774,9 +774,10 @@ const TYPE_ICONS = {
 const CAT_ICONS = {'交通':'🚄','住宿':'🏨','餐饮':'🍜','门票':'🎫','购物':'🛍️','其他':'📌'};
 const CAT_COLORS = {'交通':'#888','住宿':'#9b5de5','餐饮':'#e07a5f','门票':'#3d85c6','购物':'#ff6b6b','其他':'#6c757d'};
 
-const GITHUB_RAW = 'https://raw.githubusercontent.com/BetterYuang666/travel-app/main/data/trips.json';
-const GITHUB_API = 'https://api.github.com/repos/BetterYuang666/travel-app/contents/data/trips.json';
-const GITHUB_TOKEN = (()=>{const p=['gh','p_0KrscuZNgvEzvZZT7dkZ0UsvjzHc713','crgAY'];return p.join('');})();
+// ===== 云端同步（安全改造）=====
+// 前端不再存放任何 GitHub Token。SYNC_PROXY_URL 为空 = 纯本地模式（不连网、不泄露）。
+// 如需云端同步：部署 sync-proxy（见 sync-proxy-worker.js），把代理地址填到下面。
+const SYNC_PROXY_URL = ''; // 例：'https://travel-sync.your-subdomain.workers.dev'
 
 
 let _githubSha = null, _syncPending = false;
@@ -799,6 +800,11 @@ async function uploadToGitHub() {
   if (_syncPending) return;
   _syncPending = true;
   const statusEl = document.getElementById('sync-status');
+  if (!SYNC_PROXY_URL) {
+    if (statusEl) statusEl.textContent = '⚠️ 未启用云端同步（当前为纯本地）';
+    setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 3000);
+    return;
+  }
   try {
     if (statusEl) statusEl.textContent = '⏳ 保存中...';
 
@@ -809,8 +815,8 @@ async function uploadToGitHub() {
     let sha = _githubSha;
     if (!sha) {
       try {
-        const r = await fetch(GITHUB_API, {
-          headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+        const r = await fetch(SYNC_PROXY_URL, {
+          headers: {  'Accept': 'application/vnd.github.v3+json' }
         });
         if (r.ok) { const j = await r.json(); sha = j.sha; }
       } catch(e) {}
@@ -823,10 +829,10 @@ async function uploadToGitHub() {
     };
     if (sha) body.sha = sha;
 
-    const resp = await fetch(GITHUB_API, {
+    const resp = await fetch(SYNC_PROXY_URL, {
       method: 'PUT',
       headers: {
-        'Authorization': 'token ' + GITHUB_TOKEN,
+        
         'Content-Type': 'application/json',
         'Accept': 'application/vnd.github.v3+json'
       },
@@ -840,17 +846,17 @@ async function uploadToGitHub() {
       setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 4000);
     } else if (resp.status === 422) {
       // Conflict: refresh SHA, retry once
-      const r = await fetch(GITHUB_API, {
-        headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+      const r = await fetch(SYNC_PROXY_URL, {
+        headers: {  'Accept': 'application/vnd.github.v3+json' }
       });
       if (r.ok) {
         const j = await r.json();
         _githubSha = j.sha;
         body.sha = j.sha;
-        const retry = await fetch(GITHUB_API, {
+        const retry = await fetch(SYNC_PROXY_URL, {
           method: 'PUT',
           headers: {
-            'Authorization': 'token ' + GITHUB_TOKEN,
+            
             'Content-Type': 'application/json',
             'Accept': 'application/vnd.github.v3+json'
           },
@@ -880,6 +886,12 @@ async function uploadToGitHub() {
 async function refreshFromGitHub() {
   if (_syncPending) return;
   _syncPending = true;
+  if (!SYNC_PROXY_URL) {
+    const el = document.getElementById('sync-status');
+    if (el) el.textContent = '⚠️ 未启用云端同步（当前为纯本地）';
+    setTimeout(() => { if (el) el.textContent = ''; }, 3000);
+    return;
+  }
 
   const icon = document.getElementById('sync-icon');
   const label = document.getElementById('sync-label');
@@ -890,8 +902,8 @@ async function refreshFromGitHub() {
 
     const localData = loadData();
 
-    const resp = await fetch(GITHUB_API + '?t=' + Date.now(), {
-      headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+    const resp = await fetch(SYNC_PROXY_URL + '?t=' + Date.now(), {
+      headers: {  'Accept': 'application/vnd.github.v3+json' }
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
 
@@ -939,10 +951,11 @@ async function refreshFromGitHub() {
 
 // Silent refresh for init (no UI feedback, no push)
 async function silentRefresh() {
+  if (!SYNC_PROXY_URL) return null;
   try {
     const localData = loadData();
-    const resp = await fetch(GITHUB_API + '?t=' + Date.now(), {
-      headers: { 'Authorization': 'token ' + GITHUB_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
+    const resp = await fetch(SYNC_PROXY_URL + '?t=' + Date.now(), {
+      headers: {  'Accept': 'application/vnd.github.v3+json' }
     });
     if (!resp.ok) return null;
     const apiData = await resp.json();
@@ -1282,7 +1295,7 @@ function renderSharedTripView(trip) {
     <div class="hero">
       <div class="hero-badge">${travelerCount}人出行</div>
       <h1>${escHtml(trip.name)}</h1>
-      <p class="subtitle">${totalDays}天${totalDays-1}晚 / ${(trip.travelers||[]).join('、')} / ${escHtml(trip.destination||'')}</p>
+      <p class="subtitle">${totalDays}天${totalDays-1}晚 / ${(trip.travelers||[]).map(x=>escHtml(x)).join('、')} / ${escHtml(trip.destination||'')}</p>
       ${trip.startDate ? `
       <div class="route-line">
         <span>${formatDate(trip.startDate)}</span>
@@ -1480,9 +1493,9 @@ function renderHome() {
         <div class="trip-card ${tc}" onclick="selectTrip('${trip.id}')">
           <div class="trip-card-header">
             <div style="flex:1">
-              <h3>${trip.name}</h3>
+              <h3>${escHtml(trip.name)}</h3>
               <div class="trip-meta">
-                📍 ${trip.destination} &nbsp;|&nbsp; 📅 ${formatDate(trip.startDate)} - ${formatDate(trip.endDate)}
+                📍 ${escHtml(trip.destination)} &nbsp;|&nbsp; 📅 ${formatDate(trip.startDate)} - ${formatDate(trip.endDate)}
               </div>
             </div>
           </div>
@@ -1707,7 +1720,7 @@ function renderItinerary() {
   let selHtml = `<div class="trip-selector">
     <select onchange="selectTrip(this.value)">`;
   data.trips.forEach(t => {
-    selHtml += `<option value="${t.id}" ${t.id === trip.id ? 'selected' : ''}>${t.name}</option>`;
+    selHtml += `<option value="${escHtml(t.id)}" ${t.id === trip.id ? 'selected' : ''}>${escHtml(t.name)}</option>`;
   });
   selHtml += `</select>
     <button class="btn btn-sm btn-outline" onclick="showCreateTripModal('${trip.id}')">✏️</button>
@@ -1756,7 +1769,7 @@ function renderHero(trip) {
     <div class="hero">
       <div class="hero-badge">${trip.travelers.length}人出行</div>
       <h1>${escHtml(trip.name)}</h1>
-      <p class="subtitle">${totalDays}天${totalDays-1}晚 / ${trip.travelers.join('、')} / ${escHtml(trip.destination)}</p>
+      <p class="subtitle">${totalDays}天${totalDays-1}晚 / ${trip.travelers.map(x=>escHtml(x)).join('、')} / ${escHtml(trip.destination)}</p>
       <div class="route-line">
         <span>出发</span><span class="route-arrow">→</span>
         <span>${escHtml(trip.destination)}</span><span class="route-arrow">→</span>
@@ -2243,7 +2256,7 @@ function renderCost() {
   let selHtml = `<div class="trip-selector">
     <select onchange="selectTripForCost(this.value)">`;
   data.trips.forEach(t => {
-    selHtml += `<option value="${t.id}" ${t.id === trip.id ? 'selected' : ''}>${t.name}</option>`;
+    selHtml += `<option value="${escHtml(t.id)}" ${t.id === trip.id ? 'selected' : ''}>${escHtml(t.name)}</option>`;
   });
   selHtml += `</select></div>`;
 
@@ -2311,7 +2324,7 @@ function renderCost() {
           <div class="expense-icon" style="background:${CAT_COLORS[exp.category] || '#888'}">${CAT_ICONS[exp.category] || '📌'}</div>
           <div class="expense-info">
             <div class="expense-title">${escHtml(exp.title)}</div>
-            <div class="expense-meta">${exp.category} · ${exp.paidBy} · ${exp.date || ''}</div>
+            <div class="expense-meta">${exp.category} · ${exp.paidBy ? escHtml(exp.paidBy) : ''} · ${exp.date || ''}</div>
           </div>
           <div class="expense-amount">¥${exp.amount.toLocaleString()}</div>
           <button class="inline-btn" style="background:#fee;color:#e74c3c;font-size:10px;margin-left:4px" onclick="deleteExpense('${exp.id}')">×</button>
@@ -2414,7 +2427,7 @@ function showAddExpenseModal(editExp) {
     <div class="form-group">
       <label class="form-label">付款人</label>
       <select class="form-select" id="ef-payer">
-        ${trip.travelers.map(t => `<option value="${t}" ${editExp && editExp.paidBy === t ? 'selected' : ''}>${t}</option>`).join('')}
+        ${trip.travelers.map(t => `<option value="${escHtml(t)}" ${editExp && editExp.paidBy === t ? 'selected' : ''}>${escHtml(t)}</option>`).join('')}
       </select>
     </div>
     <div class="form-group">
@@ -2939,7 +2952,7 @@ function renderSpotGuide() {
   let html = `<div class="trip-selector">
     <select onchange="selectTripForSpot(this.value)">`;
   data.trips.forEach(t => {
-    html += `<option value="${t.id}" ${t.id === trip.id ? 'selected' : ''}>${t.name}</option>`;
+    html += `<option value="${escHtml(t.id)}" ${t.id === trip.id ? 'selected' : ''}>${escHtml(t.name)}</option>`;
   });
   html += `</select></div>`;
 
