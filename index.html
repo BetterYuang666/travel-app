@@ -775,10 +775,45 @@ const CAT_ICONS = {'交通':'🚄','住宿':'🏨','餐饮':'🍜','门票':'�
 const CAT_COLORS = {'交通':'#888','住宿':'#9b5de5','餐饮':'#e07a5f','门票':'#3d85c6','购物':'#ff6b6b','其他':'#6c757d'};
 
 // ===== 云端同步（安全改造）=====
-// 前端不再存放任何 GitHub Token。SYNC_PROXY_URL 为空 = 纯本地模式（不连网、不泄露）。
-// 如需云端同步：部署 sync-proxy（见 sync-proxy-worker.js），把代理地址填到下面。
+// 两种模式，源码均不存放任何 GitHub Token：
+//   A. 代理模式：SYNC_PROXY_URL 非空 → token 仅存于服务端代理（见 sync-proxy-worker.js）
+//   B. 自填模式：SYNC_PROXY_URL 为空且用户在「⚙️ 设置」中填写 GitHub Token → token 仅存于本机浏览器 localStorage
+// 两者都没配置 = 纯本地模式（不连网、不泄露）。
 const SYNC_PROXY_URL = ''; // 例：'https://travel-sync.your-subdomain.workers.dev'
+const GH_REPO = 'BetterYuang666/travel-app';
+const GH_DATA_PATH = 'data/trips.json';
+const GH_TOKEN_KEY = 'gh_user_token';
 
+function getGitHubToken() {
+  try { return localStorage.getItem(GH_TOKEN_KEY) || ''; } catch(e) { return ''; }
+}
+function setGitHubToken(t) {
+  try {
+    if (t && t.trim()) localStorage.setItem(GH_TOKEN_KEY, t.trim());
+    else localStorage.removeItem(GH_TOKEN_KEY);
+  } catch(e) {}
+}
+// 解析同步请求的目标地址与请求头（代理 / 浏览器直连 GitHub 统一处理）
+function _syncReqUrl(isPut, cacheBust) {
+  if (SYNC_PROXY_URL) {
+    if (isPut) return SYNC_PROXY_URL;
+    return cacheBust ? (SYNC_PROXY_URL + '?t=' + Date.now()) : SYNC_PROXY_URL;
+  }
+  const base = 'https://api.github.com/repos/' + GH_REPO + '/contents/' + GH_DATA_PATH;
+  return cacheBust ? (base + '?t=' + Date.now()) : base;
+}
+function _syncReqHeaders(isPut) {
+  const h = { 'Accept': 'application/vnd.github.v3+json' };
+  if (isPut) h['Content-Type'] = 'application/json';
+  if (!SYNC_PROXY_URL) {
+    const t = getGitHubToken();
+    if (t) h['Authorization'] = 'Bearer ' + t;
+  }
+  return h;
+}
+function _noTokenMsg(el) {
+  if (el) { el.textContent = '⚠️ 请先在「⚙️ 设置」中填写 GitHub Token 启用云端同步'; setTimeout(() => { if (el) el.textContent = ''; }, 4000); }
+}
 
 let _githubSha = null, _syncPending = false;
 
@@ -800,9 +835,9 @@ async function uploadToGitHub() {
   if (_syncPending) return;
   _syncPending = true;
   const statusEl = document.getElementById('sync-status');
-  if (!SYNC_PROXY_URL) {
-    if (statusEl) statusEl.textContent = '⚠️ 未启用云端同步（当前为纯本地）';
-    setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 3000);
+  if (!SYNC_PROXY_URL && !getGitHubToken()) {
+    _noTokenMsg(statusEl);
+    _syncPending = false;
     return;
   }
   try {
@@ -815,9 +850,7 @@ async function uploadToGitHub() {
     let sha = _githubSha;
     if (!sha) {
       try {
-        const r = await fetch(SYNC_PROXY_URL, {
-          headers: {  'Accept': 'application/vnd.github.v3+json' }
-        });
+        const r = await fetch(_syncReqUrl(false, false), { headers: _syncReqHeaders(false) });
         if (r.ok) { const j = await r.json(); sha = j.sha; }
       } catch(e) {}
     }
@@ -829,13 +862,9 @@ async function uploadToGitHub() {
     };
     if (sha) body.sha = sha;
 
-    const resp = await fetch(SYNC_PROXY_URL, {
+    const resp = await fetch(_syncReqUrl(true, false), {
       method: 'PUT',
-      headers: {
-        
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
+      headers: _syncReqHeaders(true),
       body: JSON.stringify(body)
     });
 
@@ -846,20 +875,14 @@ async function uploadToGitHub() {
       setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 4000);
     } else if (resp.status === 422) {
       // Conflict: refresh SHA, retry once
-      const r = await fetch(SYNC_PROXY_URL, {
-        headers: {  'Accept': 'application/vnd.github.v3+json' }
-      });
+      const r = await fetch(_syncReqUrl(false, false), { headers: _syncReqHeaders(false) });
       if (r.ok) {
         const j = await r.json();
         _githubSha = j.sha;
         body.sha = j.sha;
-        const retry = await fetch(SYNC_PROXY_URL, {
+        const retry = await fetch(_syncReqUrl(true, false), {
           method: 'PUT',
-          headers: {
-            
-            'Content-Type': 'application/json',
-            'Accept': 'application/vnd.github.v3+json'
-          },
+          headers: _syncReqHeaders(true),
           body: JSON.stringify(body)
         });
         if (retry.ok) {
@@ -886,10 +909,9 @@ async function uploadToGitHub() {
 async function refreshFromGitHub() {
   if (_syncPending) return;
   _syncPending = true;
-  if (!SYNC_PROXY_URL) {
-    const el = document.getElementById('sync-status');
-    if (el) el.textContent = '⚠️ 未启用云端同步（当前为纯本地）';
-    setTimeout(() => { if (el) el.textContent = ''; }, 3000);
+  if (!SYNC_PROXY_URL && !getGitHubToken()) {
+    _noTokenMsg(document.getElementById('sync-status'));
+    _syncPending = false;
     return;
   }
 
@@ -902,9 +924,7 @@ async function refreshFromGitHub() {
 
     const localData = loadData();
 
-    const resp = await fetch(SYNC_PROXY_URL + '?t=' + Date.now(), {
-      headers: {  'Accept': 'application/vnd.github.v3+json' }
-    });
+    const resp = await fetch(_syncReqUrl(false, true), { headers: _syncReqHeaders(false) });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
 
     const apiData = await resp.json();
@@ -951,12 +971,10 @@ async function refreshFromGitHub() {
 
 // Silent refresh for init (no UI feedback, no push)
 async function silentRefresh() {
-  if (!SYNC_PROXY_URL) return null;
+  if (!SYNC_PROXY_URL && !getGitHubToken()) return null;
   try {
     const localData = loadData();
-    const resp = await fetch(SYNC_PROXY_URL + '?t=' + Date.now(), {
-      headers: {  'Accept': 'application/vnd.github.v3+json' }
-    });
+    const resp = await fetch(_syncReqUrl(false, true), { headers: _syncReqHeaders(false) });
     if (!resp.ok) return null;
     const apiData = await resp.json();
     if (!apiData.content) return null;
@@ -3655,6 +3673,15 @@ function showAISettings() {
 
     <hr style="border:none;border-top:1px solid #eee;margin:16px 0">
 
+    <div class="form-group">
+      <label class="form-label">🔑 GitHub Token（启用云端同步，可选）</label>
+      <input class="form-input" id="ais-gh-token" type="password" placeholder="粘贴 ghP_... 或 github_pat_..." value="${escHtml(getGitHubToken())}">
+      <div class="form-hint">
+        仅存于本机浏览器，<b>不会写入源码</b>。需具备本仓库 <b>Contents: read &amp; write</b> 权限的 Personal Access Token →
+        <a href="https://github.com/settings/tokens" target="_blank">去创建</a>（建议用 fine-grained，仅授权 BetterYuang666/travel-app）
+      </div>
+    </div>
+
     <div class="form-hint" style="background:#e8f5e9;padding:12px;border-radius:10px;font-size:13px;line-height:1.8">
       🤖 <b>AI 景点故事 — 已内置，无需配置！</b><br>
       ✅ 点击「生成故事」自动调用免费 AI 服务<br>
@@ -3665,10 +3692,14 @@ function showAISettings() {
     <button class="btn btn-primary btn-block mt-12 modal-save-btn">保存设置</button>
   `, () => {
     const amapKey = document.getElementById('ais-amap-key').value.trim();
+    const ghToken = document.getElementById('ais-gh-token').value;
     saveAIConfig({ amapKey });
+    setGitHubToken(ghToken);
     closeModal();
-    if (amapKey) alert('✅ 高德 Key 已保存！坐标搜索将更精准。');
-    else alert('✅ 已保存！');
+    let msg = amapKey ? '✅ 高德 Key 已保存！' : '✅ 已保存！';
+    if (ghToken && ghToken.trim()) msg += ' 云端同步已启用（GitHub Token 已存入本机浏览器）。';
+    else msg += ' 未填 GitHub Token：保持纯本地。';
+    alert(msg);
   });
 }
 
