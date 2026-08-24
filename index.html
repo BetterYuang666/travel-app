@@ -824,17 +824,24 @@ function loadData() {
   } catch(e) { return { trips: [], activeTripId: null }; }
 }
 
-// Save locally only — NO auto-push (prevents accidental overwrites)
+// Save locally + auto-push to cloud (debounced) — keeps multi-device sync.
+// Auto-upload only triggers when token/proxy is configured; stays silent (no status bar).
+let _autoUploadTimer = null;
 function saveData(data) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch(e) {}
+  if (getGitHubToken() || SYNC_PROXY_URL) {
+    if (_autoUploadTimer) clearTimeout(_autoUploadTimer);
+    _autoUploadTimer = setTimeout(() => { uploadToGitHub(true); }, 2000);
+  }
 }
 
 
 // UPLOAD: push local data to GitHub (top button — save to cloud)
-async function uploadToGitHub() {
+// silent=true: auto-upload from saveData, no status bar, no UI disturbance
+async function uploadToGitHub(silent) {
   if (_syncPending) return;
   _syncPending = true;
-  const statusEl = document.getElementById('sync-status');
+  const statusEl = silent ? null : document.getElementById('sync-status');
   if (!SYNC_PROXY_URL && !getGitHubToken()) {
     _noTokenMsg(statusEl);
     _syncPending = false;
@@ -4115,6 +4122,22 @@ function isFileProtocol() {
 // ============================================================
 // INITIALIZATION
 // ============================================================
+// 多端同步引导：无 token 时弹一次提示，引导用户在本设备填 token
+function showSyncGuide() {
+  if (sessionStorage.getItem('sync_guide_shown')) return;
+  sessionStorage.setItem('sync_guide_shown', '1');
+  openModal('📱 多端数据同步', `
+    <div style="line-height:1.8;font-size:14px;color:#444">
+      <p>当前设备尚未启用云端同步，多端数据不会互通（电脑/手机各自独立）。</p>
+      <p><b>启用方法</b>：在本设备「⚙️ 设置」中粘贴一次 GitHub Token 即可。</p>
+      <p style="color:#666;font-size:13px">Token 仅存于本机浏览器，不会写入源码。每台设备各填一次。</p>
+      <p style="background:#e8f5e9;padding:10px;border-radius:8px;font-size:13px">✅ 启用后：打开 App 自动拉取云端最新数据，任何修改也会自动同步到云端，其他设备刷新即可看到。</p>
+    </div>
+    <button class="btn btn-primary btn-block mt-12" onclick="closeModal();showAISettings()">前往设置</button>
+    <button class="btn btn-block mt-8" onclick="closeModal()">稍后再说</button>
+  `);
+}
+
 function init() {
   // Check if viewing a shared trip (URL: /s/<id> or #share=<data>)
   const shareInfo = getShareIdFromURL();
@@ -4141,8 +4164,12 @@ function init() {
     if (!ghData) saveData(data);
     renderHome();
     setupWechatShare();
+    // 无 token 且非代理模式：弹多端同步引导
+    if (!getGitHubToken() && !SYNC_PROXY_URL) showSyncGuide();
   });
 
+  // 定时静默拉取云端更新（90s），保持多端接近实时；不 reRender 避免打断编辑
+  setInterval(() => { silentRefresh(); }, 90000);
 }
 
 init();
