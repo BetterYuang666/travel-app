@@ -717,6 +717,11 @@ body {
   <div class="page-wrap"><div class="page-inner" id="spot-content"></div></div>
 </div>
 
+<!-- ===== PACKING PAGE ===== -->
+<div class="page" id="packing-page">
+  <div class="page-wrap"><div class="page-inner" id="packing-content"></div></div>
+</div>
+
 <!-- ===== FAB ===== -->
 <div class="fab-wrap" id="fab-wrap" style="display:none">
   <div class="fab-menu" id="fab-menu"></div>
@@ -744,6 +749,9 @@ body {
   </button>
   <button class="tab-item" data-tab="map" onclick="switchTab('map')">
     <span class="tab-icon">🗺️</span><span class="tab-label">地图</span>
+  </button>
+  <button class="tab-item" data-tab="packing" onclick="switchTab('packing')">
+    <span class="tab-icon">🎒</span><span class="tab-label">行李</span>
   </button>
   <button class="tab-item sync-btn" id="sync-tab-btn" onclick="refreshFromGitHub()" title="从云端刷新">
     <span class="tab-icon" id="sync-icon">🔄</span><span class="tab-label" id="sync-label">刷新</span>
@@ -1104,11 +1112,11 @@ function createSampleData() {
 function switchTab(tab) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-item').forEach(b => b.classList.remove('active'));
-  const pageMap = { home:'home-page', itinerary:'itinerary-page', cost:'cost-page', map:'map-page', spot:'spot-page' };
+  const pageMap = { home:'home-page', itinerary:'itinerary-page', cost:'cost-page', map:'map-page', spot:'spot-page', packing:'packing-page' };
   const pageEl = document.getElementById(pageMap[tab]);
   if (pageEl) pageEl.classList.add('active');
   const tabBtns = document.querySelectorAll('.tab-item');
-  const idx = ['home','itinerary','cost','spot','map'].indexOf(tab);
+  const idx = ['home','itinerary','cost','spot','map','packing'].indexOf(tab);
   if (idx >= 0 && idx < tabBtns.length) tabBtns[idx].classList.add('active');
 
   if (tab === 'home') renderHome();
@@ -1116,11 +1124,208 @@ function switchTab(tab) {
   else if (tab === 'cost') renderCost();
   else if (tab === 'map') renderMap();
   else if (tab === 'spot') renderSpotGuide();
+  else if (tab === 'packing') renderPacking();
 
   // Show/hide FAB
   const fab = document.getElementById('fab-wrap');
   if (tab === 'itinerary') fab.style.display = 'block';
   else fab.style.display = 'none';
+}
+
+// ===== 行李清单 =====
+const PACKING_CATS = ['证件', '衣物', '电子', '洗漱', '药品', '其他'];
+const PACKING_TEMPLATES = {
+  '国内短途': [
+    { text: '身份证', category: '证件' }, { text: '银行卡/现金', category: '证件' },
+    { text: '换洗衣物 2 套', category: '衣物' }, { text: '外套', category: '衣物' },
+    { text: '手机', category: '电子' }, { text: '充电器+数据线', category: '电子' }, { text: '充电宝', category: '电子' },
+    { text: '洗漱用品', category: '洗漱' }, { text: '毛巾', category: '洗漱' },
+    { text: '常用药（感冒/肠胃/创可贴）', category: '药品' }
+  ],
+  '出境旅行': [
+    { text: '护照+签证', category: '证件' }, { text: '机票/酒店确认单', category: '证件' }, { text: '外币现金', category: '证件' }, { text: '信用卡', category: '证件' },
+    { text: '当季衣物', category: '衣物' }, { text: '泳衣', category: '衣物' },
+    { text: '手机+充电器', category: '电子' }, { text: '转换插头', category: '电子' }, { text: '充电宝', category: '电子' }, { text: '相机', category: '电子' },
+    { text: '旅行装洗漱', category: '洗漱' },
+    { text: '常用药', category: '药品' }, { text: '保险单', category: '药品' }
+  ],
+  '商务出差': [
+    { text: '身份证', category: '证件' }, { text: '名片', category: '证件' },
+    { text: '正装 1 套', category: '衣物' }, { text: '便装', category: '衣物' },
+    { text: '笔记本电脑+充电器', category: '电子' }, { text: '手机充电器', category: '电子' },
+    { text: '洗漱用品', category: '洗漱' }
+  ]
+};
+
+function renderPacking() {
+  const trip = getActiveTrip();
+  const container = document.getElementById('packing-content');
+  if (!trip) {
+    container.innerHTML = `
+      <div class="no-trip-selected">
+        <div class="icon">🎒</div><h3>请先选择行程</h3>
+        <p>回到首页选择或创建一个旅行计划</p>
+        <button class="btn btn-primary mt-16" onclick="switchTab('home')">去首页</button>
+      </div>`;
+    return;
+  }
+  if (!Array.isArray(trip.packingList)) trip.packingList = [];
+
+  const data = loadData();
+  let selHtml = `<div class="trip-selector"><select onchange="onPackingTripChange(this.value)">`;
+  data.trips.forEach(t => {
+    selHtml += `<option value="${escHtml(t.id)}" ${t.id === trip.id ? 'selected' : ''}>${escHtml(t.name)}</option>`;
+  });
+  selHtml += `</select></div>`;
+
+  const list = trip.packingList;
+  const total = list.length;
+  const done = list.filter(i => i.checked).length;
+  const pct = total ? Math.round(done / total * 100) : 0;
+
+  let html = selHtml + `
+    <div class="cost-summary" style="margin:12px 0">
+      <div class="cost-summary-item cs-budget">
+        <div class="cost-summary-val">${done}/${total}</div><div class="cost-summary-label">已打包</div>
+      </div>
+      <div class="cost-summary-item cs-actual">
+        <div class="cost-summary-val">${pct}%</div><div class="cost-summary-label">完成度</div>
+      </div>
+    </div>
+    <div style="background:#eee;border-radius:8px;height:8px;margin:8px 0 16px;overflow:hidden">
+      <div style="width:${pct}%;height:100%;background:#2e7d32;transition:width .3s"></div>
+    </div>
+    <div style="display:flex;gap:8px;margin:12px 0;flex-wrap:wrap">
+      <button class="btn btn-primary" style="flex:1" onclick="showAddPackingModal()">➕ 添加物品</button>
+      <button class="btn" style="flex:1" onclick="showPackingTemplateModal()">📋 导入模板</button>
+    </div>
+  `;
+
+  PACKING_CATS.forEach(cat => {
+    const items = list.filter(i => (i.category || '其他') === cat);
+    if (!items.length) return;
+    const catDone = items.filter(i => i.checked).length;
+    html += `<div class="cost-cat-block" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#f5f5f5;border-radius:8px;font-weight:bold">
+        <span>${escHtml(cat)}</span><span style="font-weight:normal;color:#888;font-size:13px">${catDone}/${items.length}</span>
+      </div>`;
+    items.forEach(it => {
+      html += `<div style="display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid #eee;gap:10px">
+        <input type="checkbox" ${it.checked ? 'checked' : ''} onchange="togglePackingItem('${escHtml(it.id)}')" style="width:20px;height:20px;flex-shrink:0;cursor:pointer">
+        <div style="flex:1;${it.checked ? 'opacity:.5;text-decoration:line-through' : ''}">
+          <div style="font-size:15px">${escHtml(it.text)}</div>
+          ${it.note ? `<div style="font-size:12px;color:#999;margin-top:2px">${escHtml(it.note)}</div>` : ''}
+        </div>
+        <button onclick="deletePackingItem('${escHtml(it.id)}')" style="background:none;border:none;color:#e53935;font-size:20px;cursor:pointer;padding:4px 8px;line-height:1">×</button>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+
+  if (!total) {
+    html += `<div class="empty-state" style="text-align:center;padding:30px;color:#999">
+      <div style="font-size:40px">🎒</div>
+      <p>还没有行李清单</p>
+      <p style="font-size:13px">点上方「导入模板」快速开始</p>
+    </div>`;
+  }
+
+  html += `<div style="text-align:center;margin:20px 0;color:#999;font-size:12px">💡 勾选已打包，多端自动同步</div>`;
+  container.innerHTML = html;
+}
+
+function onPackingTripChange(tripId) {
+  const data = loadData();
+  data.activeTripId = tripId;
+  saveData(data);
+  renderPacking();
+}
+
+function togglePackingItem(id) {
+  const trip = getActiveTrip();
+  if (!trip || !Array.isArray(trip.packingList)) return;
+  const it = trip.packingList.find(i => i.id === id);
+  if (!it) return;
+  it.checked = !it.checked;
+  const data = loadData();
+  const t = data.trips.find(x => x.id === trip.id);
+  if (t) t.packingList = trip.packingList;
+  saveData(data);
+  renderPacking();
+}
+
+function deletePackingItem(id) {
+  const trip = getActiveTrip();
+  if (!trip || !Array.isArray(trip.packingList)) return;
+  trip.packingList = trip.packingList.filter(i => i.id !== id);
+  const data = loadData();
+  const t = data.trips.find(x => x.id === trip.id);
+  if (t) t.packingList = trip.packingList;
+  saveData(data);
+  renderPacking();
+}
+
+function showAddPackingModal() {
+  if (!getActiveTrip()) return;
+  const catOpts = PACKING_CATS.map(c => `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join('');
+  openModal('➕ 添加物品', `
+    <div class="form-group">
+      <label class="form-label">物品</label>
+      <input class="form-input" id="pk-text" placeholder="如：身份证">
+    </div>
+    <div class="form-group">
+      <label class="form-label">分类</label>
+      <select class="form-input" id="pk-cat">${catOpts}</select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">备注（可选）</label>
+      <input class="form-input" id="pk-note" placeholder="如：放随身包">
+    </div>
+    <button class="btn btn-primary btn-block mt-12 modal-save-btn">保存</button>
+  `, () => {
+    const text = document.getElementById('pk-text').value.trim();
+    if (!text) { alert('请输入物品名'); return false; }
+    const cat = document.getElementById('pk-cat').value;
+    const note = document.getElementById('pk-note').value.trim();
+    addPackingItem(text, cat, note);
+  });
+}
+
+function addPackingItem(text, category, note) {
+  const data = loadData();
+  const trip = data.trips.find(t => t.id === data.activeTripId);
+  if (!trip) return;
+  if (!Array.isArray(trip.packingList)) trip.packingList = [];
+  trip.packingList.push({ id: uuid(), text, category: category || '其他', note: note || '', checked: false });
+  saveData(data);
+  renderPacking();
+}
+
+function showPackingTemplateModal() {
+  if (!getActiveTrip()) return;
+  const names = Object.keys(PACKING_TEMPLATES);
+  const opts = names.map(n => {
+    const cnt = PACKING_TEMPLATES[n].length;
+    return `<button class="btn btn-block mt-8" onclick="importPackingTemplate('${escHtml(n)}')">${escHtml(n)}（${cnt} 项）</button>`;
+  }).join('');
+  openModal('📋 导入模板', `
+    <div style="line-height:1.8;font-size:14px;color:#666;margin-bottom:12px">选择模板一键导入，可在此基础上增删：</div>
+    ${opts}
+    <div style="margin-top:16px;font-size:12px;color:#999">导入会追加到现有清单，不会删除已有项。</div>
+  `);
+}
+
+function importPackingTemplate(name) {
+  const tpl = PACKING_TEMPLATES[name];
+  if (!tpl) return;
+  const data = loadData();
+  const trip = data.trips.find(t => t.id === data.activeTripId);
+  if (!trip) return;
+  if (!Array.isArray(trip.packingList)) trip.packingList = [];
+  tpl.forEach(it => trip.packingList.push({ id: uuid(), text: it.text, category: it.category, note: '', checked: false }));
+  saveData(data);
+  closeModal();
+  renderPacking();
 }
 
 // ============================================================
