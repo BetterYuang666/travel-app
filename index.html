@@ -779,7 +779,7 @@ const CAT_COLORS = {'交通':'#888','住宿':'#9b5de5','餐饮':'#e07a5f','门�
 //   A. 代理模式：SYNC_PROXY_URL 非空 → token 仅存于服务端代理（见 sync-proxy-worker.js）
 //   B. 自填模式：SYNC_PROXY_URL 为空且用户在「⚙️ 设置」中填写 GitHub Token → token 仅存于本机浏览器 localStorage
 // 两者都没配置 = 纯本地模式（不连网、不泄露）。
-const SYNC_PROXY_URL = 'https://travel-sync-proxy.betteryuang666.workers.dev';
+const SYNC_PROXY_URL = ''; // workers.dev 国内访问困难，暂用直连 GitHub API（匿名读 + token 写）
 const GH_REPO = 'BetterYuang666/travel-app';
 const GH_DATA_PATH = 'data/trips.json';
 const GH_TOKEN_KEY = 'gh_user_token';
@@ -903,7 +903,7 @@ async function uploadToGitHub(silent) {
         if (statusEl) statusEl.textContent = '⚠️ 保存失败';
       }
     } else {
-      if (statusEl) statusEl.textContent = '⚠️ 保存失败 (' + resp.status + ')';
+      if (statusEl) statusEl.textContent = (resp.status === 401) ? '⚠️ 微信内无法保存，请在浏览器中打开' : ('⚠️ 保存失败 (' + resp.status + ')');
     }
   } catch(e) {
     if (statusEl) statusEl.textContent = '⚠️ 网络错误';
@@ -916,11 +916,6 @@ async function uploadToGitHub(silent) {
 async function refreshFromGitHub() {
   if (_syncPending) return;
   _syncPending = true;
-  if (!SYNC_PROXY_URL && !getGitHubToken()) {
-    _noTokenMsg(document.getElementById('sync-status'));
-    _syncPending = false;
-    return;
-  }
 
   const icon = document.getElementById('sync-icon');
   const label = document.getElementById('sync-label');
@@ -977,8 +972,8 @@ async function refreshFromGitHub() {
 }
 
 // Silent refresh for init (no UI feedback, no push)
+// 匿名读：公开仓库允许无 token GET，微信 webview 对匿名请求友好（仅 Authorization 头会触发 401）
 async function silentRefresh() {
-  if (!SYNC_PROXY_URL && !getGitHubToken()) return null;
   try {
     const localData = loadData();
     const resp = await fetch(_syncReqUrl(false, true), { headers: _syncReqHeaders(false) });
@@ -4168,8 +4163,8 @@ function init() {
     if (!getGitHubToken() && !SYNC_PROXY_URL) showSyncGuide();
   });
 
-  // 定时静默拉取云端更新（90s），保持多端接近实时；不 reRender 避免打断编辑
-  setInterval(() => { silentRefresh(); }, 90000);
+  // 定时静默拉取云端更新（90s）；仅在有 token 时跑，避免匿名请求触发 rate limit
+  setInterval(() => { if (getGitHubToken() || SYNC_PROXY_URL) silentRefresh(); }, 90000);
 }
 
 init();
